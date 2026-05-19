@@ -10,4 +10,9 @@ const seatSchema = new mongoose.Schema({
   createdAt: { type: String, default: getCurrentTime }, // 예약 시간
 });
 
+seatSchema.index(
+  { showId: 1, date: 1, time: 1, seatNumbers: 1 },
+  { unique: true }
+);
+
 export default mongoose.model("Seat", seatSchema, "seats");
