@@ -1,21 +1,25 @@
+import mongoose from "mongoose";
 import Seat from "../../models/reservation/seatSchema.js";
 import { parseISO, format } from "date-fns";
 
 // 좌석 예약 생성
 export const createSeatReservation = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { showId, date, time, seatNumbers, userId } = req.body;
     const parsedDate = new Date(date);
     parsedDate.setUTCHours(0, 0, 0, 0); // 시간을 UTC로 설정하여 시간 부분 제거
     const formattedDate = parsedDate.toISOString(); // 전체 ISO 형식 유지
 
-    // 기존에 예약된 좌석 수 확인
+    // 트랜잭션 세션 안에서 조회 (동시 요청 차단)
     const existingReservations = await Seat.find({
       showId,
       date: new Date(formattedDate),
       time,
       userId,
-    });
+    }).session(session);
 
     // 예약된 좌석 수와 새로 예약하려는 좌석 수를 합산하여 2개를 초과하는지 확인
     const totalReservedSeats = existingReservations.reduce(
@@ -26,6 +30,8 @@ export const createSeatReservation = async (req, res) => {
     );
 
     if (totalReservedSeats + seatNumbers.length > 2) {
+      await session.abortTransaction();
+      session.endSession();
       return res
         .status(400)
         .json({ message: "한 아이디당 최대 2매까지 예매 가능합니다!" });
@@ -39,9 +45,22 @@ export const createSeatReservation = async (req, res) => {
       userId,
     });
 
-    await newSeatReservation.save();
+    await newSeatReservation.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
     res.status(201).json({ message: "Seat reservation created successfully" });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+
+    if (error.code === 11000) {
+      return res.status(400).json({ message: "이미 예약된 좌석입니다." });
+    }
+     // WriteConflict 처리 추가
+    if (error.codeName === 'WriteConflict' || error.code === 112) {
+      return res.status(400).json({ message: "동시 요청이 많아 예약에 실패했습니다. 다시 시도해주세요." });
+    }
     console.error("Failed to create seat reservation:", error);
     res
       .status(500)

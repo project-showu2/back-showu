@@ -1,8 +1,12 @@
+import mongoose from "mongoose";
 import { isSameDay, startOfDay, endOfDay } from "date-fns";
 import Rental from "../../models/reservation/rentalSchema.js";
 
 // 예약 생성
 export const createReservation = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     console.log("Request Body:", req.body);
     const { userId, spaceId, name, location, rentalPeriod, img } = req.body;
@@ -12,18 +16,18 @@ export const createReservation = async (req, res) => {
       const date = startOfDay(new Date(period.date));
       const timeSlots =
         period.timeSlots.length === 0
-          ? Array.from({ length: 15 }, (_, i) => 8 + i) // 하루 전체 타임슬롯 (8시부터 22시까지)
+          ? Array.from({ length: 15 }, (_, i) => 8 + i)
           : period.timeSlots;
       return { date, timeSlots };
     });
 
-    // 중복 예약 확인
+    // 중복 예약 확인 (트랜잭션 세션 안에서 조회)
     for (let i = 0; i < parsedRentalPeriod.length; i++) {
       const period = parsedRentalPeriod[i];
       const existingReservations = await Rental.find({
         spaceId,
         "rentalPeriod.date": period.date,
-      });
+      }).session(session);
 
       const conflictingSlots = [];
       existingReservations.forEach((rental) => {
@@ -39,10 +43,10 @@ export const createReservation = async (req, res) => {
       });
 
       if (conflictingSlots.length > 0) {
+        await session.abortTransaction();
+        session.endSession();
         return res.status(400).json({
-          message: `이미 예약된 시간대입니다. 다른 시간대를 선택해주세요. 겹치는 시간대: ${conflictingSlots.join(
-            ", "
-          )}`,
+          message: `이미 예약된 시간대입니다. 다른 시간대를 선택해주세요. 겹치는 시간대: ${conflictingSlots.join(", ")}`,
         });
       }
     }
@@ -56,15 +60,20 @@ export const createReservation = async (req, res) => {
       userId,
     });
 
-    await newRental.save();
-    res
-      .status(201)
-      .json({ message: "Rental created successfully", rental: newRental });
+    await newRental.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
+    res.status(201).json({ message: "Rental created successfully", rental: newRental });
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+
+    if (error.codeName === 'WriteConflict' || error.code === 112) {
+      return res.status(400).json({ message: "동시 요청이 많아 예약에 실패했습니다. 다시 시도해주세요." });
+    }
     console.error("Failed to create rental:", error);
-    res
-      .status(500)
-      .json({ message: "Failed to create rental", error: error.message });
+    res.status(500).json({ message: "Failed to create rental", error: error.message });
   }
 };
 
@@ -91,7 +100,7 @@ export const getReservedTimes = async (req, res) => {
           })
         )
     );
-    console.log("서버에서 반환된 예약된 시간대:", reservedTimes); // 로그 출력 추가
+    console.log("서버에서 반환된 예약된 시간대:", reservedTimes);
     res.status(200).json(reservedTimes);
   } catch (error) {
     console.error("Failed to retrieve reserved times:", error);
@@ -120,7 +129,6 @@ export const getAvailableTimes = async (req, res) => {
         .flatMap((period) => period.timeSlots)
     );
 
-    // 1시간 단위로 예약 가능한 모든 시간대 생성
     const allTimes = [];
     for (let i = 8; i <= 22; i++) {
       const time = new Date(startDate);
@@ -128,7 +136,6 @@ export const getAvailableTimes = async (req, res) => {
       allTimes.push(time);
     }
 
-    // 예약된 시간을 제외한 가능한 시간을 필터링
     const availableTimes = allTimes.filter(
       (time) =>
         !reservedTimes.some(
